@@ -11,6 +11,7 @@ import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { treeindex, qdrant } from "./utils/ragClients.js";
 import { v4 as uuidv4 } from "uuid";
 import prisma from "./utils/prismaClient.js";
+import { recordIngestionJobDuration } from "./utils/metrics.js";
 
 function sanitizeErrorMessage(message) {
     if (!message) return null;
@@ -279,6 +280,7 @@ async function processVectorLess(docsRootUrl, chatId, chatSourceId) {
 const worker = new Worker(
     "chatCreation",
     async (job) => {
+        const startTime = process.hrtime();
         const { chatId, docsUrl, collectionName, chatSourceId, isVectorLess } = job.data;
         const run = await prisma.ingestionRun.create({
             data: {
@@ -315,6 +317,12 @@ const worker = new Worker(
                 },
             });
             throw err;
+        } finally {
+            const diff = process.hrtime(startTime);
+            const durationInSeconds = diff[0] + diff[1] / 1e9;
+            await recordIngestionJobDuration(durationInSeconds).catch((err) => {
+                console.error("Failed to record job duration metric:", err.message);
+            });
         }
     },
     {

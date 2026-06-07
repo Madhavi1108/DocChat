@@ -1,8 +1,34 @@
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import {
+    metricsMiddleware,
+    metricsAuthMiddleware,
+    checkHealth,
+    getPrometheusMetrics,
+    contentType,
+} from "./utils/metrics.js";
 
 const app = express();
+
+app.use(metricsMiddleware);
+
+// Health check endpoint
+app.get("/healthz", async (req, res) => {
+    const { isHealthy, status } = await checkHealth();
+    res.status(isHealthy ? 200 : 503).json(status);
+});
+
+// Prometheus metrics endpoint
+app.get("/metrics", metricsAuthMiddleware, async (req, res) => {
+    try {
+        const metrics = await getPrometheusMetrics();
+        res.set("Content-Type", contentType);
+        res.send(metrics);
+    } catch (error) {
+        res.status(500).send(error.message);
+    }
+});
 
 const errorHandler = (err, req, res, next) => {
     const statusCode = err.statusCode || 500;

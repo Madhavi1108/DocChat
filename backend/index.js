@@ -10,6 +10,8 @@ connectDB()
 
         app.listen(process.env.PORT, () => {
             console.log(`Server running at: ${process.env.PORT}`);
+            console.log(`Health endpoint enabled at: http://localhost:${process.env.PORT}/healthz`);
+            console.log(`Metrics endpoint enabled at: http://localhost:${process.env.PORT}/metrics`);
         });
     })
     .catch((error) => {
