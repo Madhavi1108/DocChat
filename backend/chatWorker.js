@@ -75,6 +75,8 @@ function getWorkerConfig() {
 }
 
 async function processVector(docsRootUrl, chatId, collectionName, chatSourceId, scrapeLimit) {
+    let pagesCrawled = 0;
+    let pagesFailed = 0;
     try {
         const { maxPagesPerJob } = getWorkerConfig();
         const rootUrl = normalizeUrl(docsRootUrl);
@@ -157,6 +159,7 @@ async function processVector(docsRootUrl, chatId, collectionName, chatSourceId, 
                     });
                 }
 
+                pagesCrawled++;
                 processedLinks++;
                 await updateChatProgress(chatId, {
                     status: "PROCESSING",
@@ -165,6 +168,7 @@ async function processVector(docsRootUrl, chatId, collectionName, chatSourceId, 
                     progress: Math.round((processedLinks / totalLinks) * 100),
                 });
             } catch (err) {
+                pagesFailed++;
                 console.error(`Failed link ${link}:`, err.message);
                 // Concurrency branch logic: update progress rather than throwing/breaking out
                 processedLinks++;
@@ -176,13 +180,19 @@ async function processVector(docsRootUrl, chatId, collectionName, chatSourceId, 
                 });
             }
         })));
+        
+        return { pagesCrawled, pagesFailed };
     } catch (err) {
+        err.pagesCrawled = pagesCrawled;
+        err.pagesFailed = pagesFailed;
         await markChatFailed(chatId, err);
         throw err;
     }
 }
 
 async function processVectorLess(docsRootUrl, chatId, chatSourceId, scrapeLimit) {
+    let pagesCrawled = 0;
+    let pagesFailed = 0;
     try {
         const { maxPagesPerJob, vectorlessBatchSize } = getWorkerConfig();
         await updateChatProgress(chatId, { status: "PROCESSING", progress: 0 });
@@ -208,8 +218,10 @@ async function processVectorLess(docsRootUrl, chatId, chatSourceId, scrapeLimit)
                     if (!isValidDocUrl(link, rootUrl)) return "";
                     try {
                         const { title, body } = await scrapeWebpage(link, rootUrl);
+                        pagesCrawled++;
                         return `Title: ${title}\n ${body}\n\n`;
                     } catch (error) {
+                        pagesFailed++;
                         console.error(`Failed: ${link}`, error.message);
                         return "";
                     }
@@ -259,8 +271,10 @@ async function processVectorLess(docsRootUrl, chatId, chatSourceId, scrapeLimit)
             },
         });
 
-        return;
+        return { pagesCrawled, pagesFailed };
     } catch (error) {
+        error.pagesCrawled = pagesCrawled;
+        error.pagesFailed = pagesFailed;
         console.error("Error VectorLess:", error);
         await markChatFailed(chatId, error);
         throw error;
@@ -286,10 +300,11 @@ const worker = new Worker(
         });
 
         try {
+            let stats = { pagesCrawled: 0, pagesFailed: 0 };
             if (!isVectorLess) {
-                await processVector(docsUrl, chatId, collectionName, chatSourceId, scrapeLimit);
+                stats = await processVector(docsUrl, chatId, collectionName, chatSourceId, scrapeLimit);
             } else {
-                await processVectorLess(docsUrl, chatId, chatSourceId, scrapeLimit);
+                stats = await processVectorLess(docsUrl, chatId, chatSourceId, scrapeLimit);
             }
 
             await prisma.ingestionRun.update({
@@ -299,6 +314,8 @@ const worker = new Worker(
                     finishedAt: new Date(),
                     errorCode: null,
                     errorMessage: null,
+                    pagesCrawled: stats.pagesCrawled,
+                    pagesFailed: stats.pagesFailed,
                 },
             });
 
@@ -315,6 +332,8 @@ const worker = new Worker(
                     finishedAt: new Date(),
                     errorCode: getErrorCode(err),
                     errorMessage: sanitizeErrorMessage(err?.message),
+                    pagesCrawled: err.pagesCrawled || 0,
+                    pagesFailed: err.pagesFailed || 0,
                 },
             });
             await createAuditEvent("ingestion.failed", null, chatId, {
