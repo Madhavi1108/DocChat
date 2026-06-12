@@ -220,9 +220,8 @@ async function processVectorLess(docsRootUrl, chatId, chatSourceId, scrapeLimit)
                     if (!isValidDocUrl(link, rootUrl)) return null;
                     try {
                         const { title, body } = await scrapeWebpage(link, rootUrl);
+                        pagesCrawled++;
                         return { link, title, body };
-                       pagesCrawled++; // Keep the counter if you need it
-return { link, title, body };
                     } catch (error) {
                         pagesFailed++;
                         console.error(`Failed: ${link}`, error.message);
@@ -270,7 +269,7 @@ return { link, title, body };
             },
         });
 
-       if (pages.length > 0) {
+        if (pages.length > 0) {
             await prisma.documentPage.createMany({
                 data: pages.map((page) => ({
                     pageUrl: page.pageUrl,
@@ -283,7 +282,7 @@ return { link, title, body };
                 console.error("Failed to update indexed pages:", err.message);
             });
         }
-
+        await redis.setex(getChatProgressKey(chatId), 3600, JSON.stringify({ status: "READY", progress: 100 }));
         await updateChatProgress(chatId, { status: "READY", progress: 100 });
         await prisma.chat.update({
             where: { id: chatId },
