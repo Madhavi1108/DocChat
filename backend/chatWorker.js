@@ -284,6 +284,7 @@ async function processVectorLess(docsRootUrl, chatId, chatSourceId, scrapeLimit)
         }
         await redis.setex(getChatProgressKey(chatId), 3600, JSON.stringify({ status: "READY", progress: 100 }));
         await updateChatProgress(chatId, { status: "READY", progress: 100 });
+        const actualPages = pages.length;
         await prisma.chat.update({
             where: { id: chatId },
             data: {
@@ -292,7 +293,10 @@ async function processVectorLess(docsRootUrl, chatId, chatSourceId, scrapeLimit)
                 chatSources: {
                     update: {
                         where: { id: chatSourceId },
-                        data: { collectionName: docTree.id },
+                        data: {
+                            collectionName: docTree.id,
+                            totalPages: actualPages,
+                        },
                     },
                 },
             },

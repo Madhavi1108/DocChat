@@ -1,7 +1,7 @@
 import client from "prom-client";
-import { Queue } from "bullmq";
 import prisma from "./prismaClient.js";
 import redis from "./redis.js";
+import { getChatCreationQueue } from "./queue.js";
 
 // Initialize prom-client Registry
 const registry = new client.Registry();
@@ -30,7 +30,7 @@ export const metricsMiddleware = (req, res, next) => {
         const durationInSeconds = diff[0] + diff[1] / 1e9;
         
         // Use req.route?.path (or fallback) to avoid high cardinality metrics from path parameters
-        const route = req.route ? req.route.path : req.path;
+        const route = req.route ? req.route.path : "unmatched";
         httpRequestDuration.observe(
             {
                 method: req.method,
@@ -100,14 +100,17 @@ export async function recordIngestionJobDuration(durationInSeconds) {
     const buckets = [5, 15, 30, 60, 120, 300, 600];
     const multi = redis.multi();
 
+    let bucketToIncrement = "+Inf";
     for (const le of buckets) {
         if (durationInSeconds <= le) {
-            multi.hincrby("metrics:ingestion_job_duration_seconds:buckets", String(le), 1);
+            bucketToIncrement = String(le);
+            break;
         }
     }
-    multi.hincrby("metrics:ingestion_job_duration_seconds:buckets", "+Inf", 1);
+
+    multi.hincrby("metrics:ingestion_job_duration_seconds:buckets", bucketToIncrement, 1);
     multi.incrbyfloat("metrics:ingestion_job_duration_seconds:sum", durationInSeconds);
-    multi.incr("metrics:ingestion_job_duration_seconds:count", 1);
+    multi.incr("metrics:ingestion_job_duration_seconds:count");
 
     await multi.exec().catch((err) => {
         console.error("Failed to record job duration metric in Redis:", err.message);
@@ -126,9 +129,11 @@ async function getWorkerMetricsFromRedis() {
         "# TYPE ingestion_job_duration_seconds histogram"
     ];
 
+    let runningSum = 0;
     for (const le of buckets) {
         const val = parseInt(hash[le] || "0", 10);
-        lines.push(`ingestion_job_duration_seconds_bucket{le="${le}"} ${val}`);
+        runningSum += val;
+        lines.push(`ingestion_job_duration_seconds_bucket{le="${le}"} ${runningSum}`);
     }
 
     lines.push(`ingestion_job_duration_seconds_sum ${parseFloat(sum)}`);
@@ -137,39 +142,69 @@ async function getWorkerMetricsFromRedis() {
     return lines.join("\n");
 }
 
-// Helper to get BullMQ queue metrics
-const chatCreationQueue = new Queue("chatCreation", { connection: redis });
-
-async function getQueueMetrics() {
-    try {
-        const counts = await chatCreationQueue.getJobCounts();
-        return [
-            "# HELP bullmq_queue_jobs_waiting Number of waiting jobs in BullMQ.",
-            "# TYPE bullmq_queue_jobs_waiting gauge",
-            `bullmq_queue_jobs_waiting ${counts.waiting || 0}`,
-            "# HELP bullmq_queue_jobs_active Number of active jobs in BullMQ.",
-            "# TYPE bullmq_queue_jobs_active gauge",
-            `bullmq_queue_jobs_active ${counts.active || 0}`,
-            "# HELP bullmq_queue_jobs_failed Number of failed jobs in BullMQ.",
-            "# TYPE bullmq_queue_jobs_failed gauge",
-            `bullmq_queue_jobs_failed ${counts.failed || 0}`,
-            "# HELP bullmq_queue_jobs_completed Number of completed jobs in BullMQ.",
-            "# TYPE bullmq_queue_jobs_completed gauge",
-            `bullmq_queue_jobs_completed ${counts.completed || 0}`
-        ].join("\n");
-    } catch (error) {
-        console.error("Failed to query queue metrics:", error.message);
-        return "";
+// Register gauges for BullMQ queue metrics using prom-client
+const queueJobsWaiting = new client.Gauge({
+    name: "bullmq_queue_jobs_waiting",
+    help: "Number of waiting jobs in BullMQ.",
+    registers: [registry],
+    async collect() {
+        try {
+            const counts = await getChatCreationQueue().getJobCounts();
+            this.set(counts.waiting || 0);
+        } catch (error) {
+            console.error("Failed to query queue metrics:", error.message);
+        }
     }
-}
+});
+
+const queueJobsActive = new client.Gauge({
+    name: "bullmq_queue_jobs_active",
+    help: "Number of active jobs in BullMQ.",
+    registers: [registry],
+    async collect() {
+        try {
+            const counts = await getChatCreationQueue().getJobCounts();
+            this.set(counts.active || 0);
+        } catch (error) {
+            console.error("Failed to query queue metrics:", error.message);
+        }
+    }
+});
+
+const queueJobsFailed = new client.Gauge({
+    name: "bullmq_queue_jobs_failed",
+    help: "Number of failed jobs in BullMQ.",
+    registers: [registry],
+    async collect() {
+        try {
+            const counts = await getChatCreationQueue().getJobCounts();
+            this.set(counts.failed || 0);
+        } catch (error) {
+            console.error("Failed to query queue metrics:", error.message);
+        }
+    }
+});
+
+const queueJobsCompleted = new client.Gauge({
+    name: "bullmq_queue_jobs_completed",
+    help: "Number of completed jobs in BullMQ.",
+    registers: [registry],
+    async collect() {
+        try {
+            const counts = await getChatCreationQueue().getJobCounts();
+            this.set(counts.completed || 0);
+        } catch (error) {
+            console.error("Failed to query queue metrics:", error.message);
+        }
+    }
+});
 
 // Generate the full Prometheus-formatted metrics string
 export async function getPrometheusMetrics() {
     const appMetrics = await registry.metrics();
-    const queueMetrics = await getQueueMetrics();
     const workerMetrics = await getWorkerMetricsFromRedis();
 
-    return [appMetrics, queueMetrics, workerMetrics].join("\n");
+    return [appMetrics, workerMetrics].filter(Boolean).join("\n\n");
 }
 
 export const contentType = registry.contentType;
